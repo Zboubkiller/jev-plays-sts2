@@ -115,7 +115,7 @@ Environment variables, all optional unless noted:
 | `ANTHROPIC_API_KEY` | none | Required if `DECISION_BACKEND=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Any Claude model |
 | `GEMINI_API_KEY` | none | Required if `DECISION_BACKEND=gemini` |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Any Gemini model |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | Any Gemini model |
 | `POLL_INTERVAL` | `3.0` | Seconds between each decision (lower = faster but harder to watch) |
 | `OVERLAY_PORT` | `8934` | Port for the local overlay web server |
 
@@ -147,7 +147,7 @@ To use Gemini:
 ```bash
 export DECISION_BACKEND=gemini
 export GEMINI_API_KEY="AIza..."
-# optional: export GEMINI_MODEL=gemini-2.5-pro  (defaults to gemini-2.5-flash)
+# optional: export GEMINI_MODEL=gemini-3.6-pro  (defaults to gemini-3.6-flash)
 python bridge.py
 ```
 
