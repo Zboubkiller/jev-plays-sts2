@@ -13,7 +13,7 @@ Setup:
   1. Pick a decision backend and set its API key, see the DECISION_BACKEND
      section below and the README for details. Jev is the default because
      it's what this was built and tuned around (fast, cheap, classification
-     only), but OpenAI and Anthropic chat models work too.
+     only), but OpenAI, Anthropic, and Gemini chat models work too.
   2. Install the STS2MCP mod (see README.md / mods/ folder in this repo)
      into Slay the Spire 2's mods/ directory and enable mods in-game.
   3. Launch the game, then run: python bridge.py
@@ -39,9 +39,10 @@ STS2_BASE = "http://localhost:15526/api/v1/singleplayer"
 # --- Decision backend selection ---
 # DECISION_BACKEND picks what answers "what's the best move": "jev" (default,
 # TypeSafe's classification-only model), "openai" (any OpenAI-compatible chat
-# completions endpoint), or "anthropic" (Claude via the Messages API). All
-# three implement the same interface: given a state description and a list
-# of named options, return which option key was chosen.
+# completions endpoint), "anthropic" (Claude via the Messages API), or
+# "gemini" (Google's Generative Language API). All four implement the same
+# interface: given a state description and a list of named options, return
+# which option key was chosen.
 BACKEND = os.environ.get("DECISION_BACKEND", "jev").lower()
 
 JEV_API_URL = "https://api.typesafe.ai/v1/systemone"
@@ -55,20 +56,25 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
 if BACKEND == "jev" and not JEV_API_KEY:
     raise SystemExit(
         "DECISION_BACKEND is 'jev' (the default) but JEV_API_KEY is not set.\n"
         "Get a key from https://typesafe.ai and set it, e.g.:\n"
         '  PowerShell:  $env:JEV_API_KEY = "your-key-here"\n'
         '  bash/zsh:    export JEV_API_KEY="your-key-here"\n'
-        "Or set DECISION_BACKEND=openai / DECISION_BACKEND=anthropic to use an LLM instead, see README."
+        "Or set DECISION_BACKEND to openai, anthropic, or gemini to use an LLM instead, see README."
     )
 elif BACKEND == "openai" and not OPENAI_API_KEY:
     raise SystemExit("DECISION_BACKEND=openai but OPENAI_API_KEY is not set.")
 elif BACKEND == "anthropic" and not ANTHROPIC_API_KEY:
     raise SystemExit("DECISION_BACKEND=anthropic but ANTHROPIC_API_KEY is not set.")
-elif BACKEND not in ("jev", "openai", "anthropic"):
-    raise SystemExit(f"Unknown DECISION_BACKEND '{BACKEND}', expected 'jev', 'openai', or 'anthropic'.")
+elif BACKEND == "gemini" and not GEMINI_API_KEY:
+    raise SystemExit("DECISION_BACKEND=gemini but GEMINI_API_KEY is not set.")
+elif BACKEND not in ("jev", "openai", "anthropic", "gemini"):
+    raise SystemExit(f"Unknown DECISION_BACKEND '{BACKEND}', expected 'jev', 'openai', 'anthropic', or 'gemini'.")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "3.0"))
 OVERLAY_PORT = int(os.environ.get("OVERLAY_PORT", "8934"))
 CURRENT_SCREEN = [None]  # mutable single-item list so ask_decision can read the latest value
@@ -216,6 +222,8 @@ def ask_decision(state_text, options, instructions):
         choice, conf, probs = _ask_openai(state_text, options, instructions)
     elif BACKEND == "anthropic":
         choice, conf, probs = _ask_anthropic(state_text, options, instructions)
+    elif BACKEND == "gemini":
+        choice, conf, probs = _ask_gemini(state_text, options, instructions)
     else:
         choice, conf, probs = _ask_jev(state_text, options, instructions)
     update_overlay(CURRENT_SCREEN[0], choice, conf, probs, options, state_text)
@@ -311,6 +319,27 @@ def _ask_anthropic(state_text, options, instructions):
     raw = "".join(block.get("text", "") for block in result.get("content", []))
     choice = _extract_choice(raw, options)
     print(f"  [anthropic:{ANTHROPIC_MODEL}] chose '{choice}'")
+    return choice, 1.0, {choice: 1.0}
+
+
+def _ask_gemini(state_text, options, instructions):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    body = {
+        "system_instruction": {"parts": [{"text": _decision_system_prompt(instructions, options)}]},
+        "contents": [{"role": "user", "parts": [{"text": state_text}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 20}
+    }
+    result = http_post(url, body)
+    if "error" in result:
+        print(f"  [gemini error] {result['error']}, falling back to first option")
+        return next(iter(options)), None, {}
+    try:
+        raw = result["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        print(f"  [gemini error] unexpected response shape: {json.dumps(result)[:200]}, falling back to first option")
+        return next(iter(options)), None, {}
+    choice = _extract_choice(raw, options)
+    print(f"  [gemini:{GEMINI_MODEL}] chose '{choice}'")
     return choice, 1.0, {choice: 1.0}
 
 

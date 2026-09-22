@@ -92,13 +92,15 @@ Environment variables, all optional unless noted:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DECISION_BACKEND` | `jev` | `jev`, `openai`, or `anthropic` |
+| `DECISION_BACKEND` | `jev` | `jev`, `openai`, `anthropic`, or `gemini` |
 | `JEV_API_KEY` | none | Required if `DECISION_BACKEND=jev` |
 | `OPENAI_API_KEY` | none | Required if `DECISION_BACKEND=openai` |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Any OpenAI chat model |
 | `OPENAI_API_URL` | OpenAI's endpoint | Point this at any OpenAI-compatible endpoint (local models, other providers) |
 | `ANTHROPIC_API_KEY` | none | Required if `DECISION_BACKEND=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Any Claude model |
+| `GEMINI_API_KEY` | none | Required if `DECISION_BACKEND=gemini` |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Any Gemini model |
 | `POLL_INTERVAL` | `3.0` | Seconds between each decision (lower = faster but harder to watch) |
 | `OVERLAY_PORT` | `8934` | Port for the local overlay web server |
 
@@ -123,6 +125,14 @@ To use Anthropic:
 export DECISION_BACKEND=anthropic
 export ANTHROPIC_API_KEY="sk-ant-..."
 # optional: export ANTHROPIC_MODEL=claude-sonnet-4-5  (defaults to claude-haiku-4-5)
+python bridge.py
+```
+
+To use Gemini:
+```bash
+export DECISION_BACKEND=gemini
+export GEMINI_API_KEY="AIza..."
+# optional: export GEMINI_MODEL=gemini-2.5-pro  (defaults to gemini-2.5-flash)
 python bridge.py
 ```
 
