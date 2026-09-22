@@ -15,7 +15,7 @@ Two more one-line patches in `McpMod.StateBuilder.cs`:
 
 Both are in multiplayer-lobby code this project doesn't use (singleplayer
 only), so they're safe stubs, not real fixes. If you hit a build error on a
-newer game version, check the upstream repo's issues first — this compat
+newer game version, check the upstream repo's issues first. This compat
 treadmill is ongoing since the game is still in active beta.
 
 To rebuild yourself instead of using the prebuilt DLL:

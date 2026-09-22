@@ -23,7 +23,7 @@ SOFTWARE.
 ---
 
 This repo bundles a rebuilt copy of STS2MCP (mods/STS2_MCP.dll), a separate
-MIT-licensed project by Yikun Ji (Kunologist) — see mods/STS2_MCP_LICENSE.txt.
+MIT-licensed project by Yikun Ji (Kunologist), see mods/STS2_MCP_LICENSE.txt.
 The bundled DLL is built from https://github.com/DarkArcZ/STS2MCP (branch
 fix/v0.111-compat) on top of https://github.com/Gennadiyev/STS2MCP, with two
 extra one-line patches to compile against a newer game build (see

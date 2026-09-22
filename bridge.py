@@ -2,27 +2,28 @@
 """
 Jev plays Slay the Spire 2.
 
-Polls the STS2MCP mod's local API for game state, asks Jev (TypeSafe's
-classification-only "System One" model) which action to take, and executes
-it back through STS2MCP. Handles combat, map navigation, card rewards, rest
-sites, shops, treasure, events, and relic/hand selection. Anything
-unrecognized is left alone (not sent a blind action) so a bad state can't
-crash the mod's HTTP server.
+Polls the STS2MCP mod's local API for game state, asks a decision backend
+(Jev by default, or an LLM chat API if configured, see DECISION_BACKEND
+below) which action to take, and executes it back through STS2MCP. Handles
+combat, map navigation, card rewards, rest sites, shops, treasure, events,
+and relic/hand selection. Anything unrecognized is left alone (not sent a
+blind action) so a bad state can't crash the mod's HTTP server.
 
 Setup:
-  1. Get a Jev API key from https://typesafe.ai (System One / Jev product)
-     and set it as an environment variable:
-       Windows (PowerShell): $env:JEV_API_KEY = "your-key-here"
-       macOS/Linux:           export JEV_API_KEY="your-key-here"
+  1. Pick a decision backend and set its API key, see the DECISION_BACKEND
+     section below and the README for details. Jev is the default because
+     it's what this was built and tuned around (fast, cheap, classification
+     only), but OpenAI and Anthropic chat models work too.
   2. Install the STS2MCP mod (see README.md / mods/ folder in this repo)
      into Slay the Spire 2's mods/ directory and enable mods in-game.
   3. Launch the game, then run: python bridge.py
   4. Optional: open http://localhost:8934/ as an OBS Browser Source to
-     show Jev's live decisions on stream.
+     show the bot's live decisions on stream.
 
 This is a fast, cheap hack project, not a tuned Slay the Spire bot. It uses
-generic deckbuilding heuristics plus a community tier list snapshot - expect
-it to make bad calls sometimes. PRs welcome.
+generic deckbuilding heuristics plus a community tier list snapshot, expect
+it to make bad calls sometimes. See the "Tuning" section in the README for
+where to change its behavior. PRs welcome.
 """
 import json
 import os
@@ -34,18 +35,43 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STS2_BASE = "http://localhost:15526/api/v1/singleplayer"
+
+# --- Decision backend selection ---
+# DECISION_BACKEND picks what answers "what's the best move": "jev" (default,
+# TypeSafe's classification-only model), "openai" (any OpenAI-compatible chat
+# completions endpoint), or "anthropic" (Claude via the Messages API). All
+# three implement the same interface: given a state description and a list
+# of named options, return which option key was chosen.
+BACKEND = os.environ.get("DECISION_BACKEND", "jev").lower()
+
 JEV_API_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_API_KEY = os.environ.get("JEV_API_KEY")
-if not JEV_API_KEY:
+
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+if BACKEND == "jev" and not JEV_API_KEY:
     raise SystemExit(
-        "JEV_API_KEY environment variable is not set.\n"
+        "DECISION_BACKEND is 'jev' (the default) but JEV_API_KEY is not set.\n"
         "Get a key from https://typesafe.ai and set it, e.g.:\n"
         '  PowerShell:  $env:JEV_API_KEY = "your-key-here"\n'
-        '  bash/zsh:    export JEV_API_KEY="your-key-here"'
+        '  bash/zsh:    export JEV_API_KEY="your-key-here"\n'
+        "Or set DECISION_BACKEND=openai / DECISION_BACKEND=anthropic to use an LLM instead, see README."
     )
+elif BACKEND == "openai" and not OPENAI_API_KEY:
+    raise SystemExit("DECISION_BACKEND=openai but OPENAI_API_KEY is not set.")
+elif BACKEND == "anthropic" and not ANTHROPIC_API_KEY:
+    raise SystemExit("DECISION_BACKEND=anthropic but ANTHROPIC_API_KEY is not set.")
+elif BACKEND not in ("jev", "openai", "anthropic"):
+    raise SystemExit(f"Unknown DECISION_BACKEND '{BACKEND}', expected 'jev', 'openai', or 'anthropic'.")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "3.0"))
 OVERLAY_PORT = int(os.environ.get("OVERLAY_PORT", "8934"))
-CURRENT_SCREEN = [None]  # mutable single-item list so ask_jev can read the latest value
+CURRENT_SCREEN = [None]  # mutable single-item list so ask_decision can read the latest value
 
 # Shared state read by the overlay HTTP server, written after every Jev call.
 _overlay_lock = threading.Lock()
@@ -182,8 +208,21 @@ def do_action(action, **params):
     return result
 
 
-def ask_jev(state_text, options, instructions):
-    """options: dict of {key: description}. Returns the chosen key."""
+def ask_decision(state_text, options, instructions):
+    """Ask whichever backend is configured which option to take.
+    options: dict of {key: description}. Returns the chosen key.
+    Dispatches to Jev, OpenAI, or Anthropic based on DECISION_BACKEND."""
+    if BACKEND == "openai":
+        choice, conf, probs = _ask_openai(state_text, options, instructions)
+    elif BACKEND == "anthropic":
+        choice, conf, probs = _ask_anthropic(state_text, options, instructions)
+    else:
+        choice, conf, probs = _ask_jev(state_text, options, instructions)
+    update_overlay(CURRENT_SCREEN[0], choice, conf, probs, options, state_text)
+    return choice
+
+
+def _ask_jev(state_text, options, instructions):
     questions = {
         "action": {
             "type": "choice",
@@ -198,13 +237,81 @@ def ask_jev(state_text, options, instructions):
     )
     if "error" in result:
         print(f"  [jev error] {result['error']}, falling back to first option")
-        return next(iter(options))
+        choice = next(iter(options))
+        return choice, None, {}
     choice = result["answers"]["action"]["choice"]
     probs = result["answers"]["action"].get("probabilities", {})
     conf = probs.get(choice)
     print(f"  [jev] chose '{choice}' (p={conf})")
-    update_overlay(CURRENT_SCREEN[0], choice, conf, probs, options, state_text)
-    return choice
+    return choice, conf, probs
+
+
+def _format_options_block(options):
+    return "\n".join(f"- {key}: {desc}" for key, desc in options.items())
+
+
+def _extract_choice(raw_text, options):
+    """LLM chat backends reply in free text, not a validated enum, so match it back
+    against the known option keys: exact match first, then substring, then give up
+    and fall back to the first option rather than crash on a bad response."""
+    text = (raw_text or "").strip()
+    if text in options:
+        return text
+    for key in options:
+        if key.lower() in text.lower():
+            return key
+    print(f"  [warning] could not match backend response '{text[:80]}' to any option, using the first one")
+    return next(iter(options))
+
+
+def _decision_system_prompt(instructions, options):
+    return (
+        instructions
+        + "\n\nOptions (pick exactly one):\n"
+        + _format_options_block(options)
+        + "\n\nReply with ONLY the option key from the list above, nothing else. No punctuation, "
+        "no explanation, just the key exactly as written (e.g. 'play_0' or 'end_turn')."
+    )
+
+
+def _ask_openai(state_text, options, instructions):
+    body = {
+        "model": OPENAI_MODEL,
+        "temperature": 0,
+        "max_tokens": 20,
+        "messages": [
+            {"role": "system", "content": _decision_system_prompt(instructions, options)},
+            {"role": "user", "content": state_text}
+        ]
+    }
+    result = http_post(OPENAI_API_URL, body, headers={"Authorization": f"Bearer {OPENAI_API_KEY}"})
+    if "error" in result:
+        print(f"  [openai error] {result['error']}, falling back to first option")
+        return next(iter(options)), None, {}
+    raw = result["choices"][0]["message"]["content"]
+    choice = _extract_choice(raw, options)
+    print(f"  [openai:{OPENAI_MODEL}] chose '{choice}'")
+    return choice, 1.0, {choice: 1.0}
+
+
+def _ask_anthropic(state_text, options, instructions):
+    body = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 20,
+        "system": _decision_system_prompt(instructions, options),
+        "messages": [{"role": "user", "content": state_text}]
+    }
+    result = http_post(
+        ANTHROPIC_API_URL, body,
+        headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01"}
+    )
+    if "error" in result:
+        print(f"  [anthropic error] {result['error']}, falling back to first option")
+        return next(iter(options)), None, {}
+    raw = "".join(block.get("text", "") for block in result.get("content", []))
+    choice = _extract_choice(raw, options)
+    print(f"  [anthropic:{ANTHROPIC_MODEL}] chose '{choice}'")
+    return choice, 1.0, {choice: 1.0}
 
 
 def deck_summary(player):
@@ -431,7 +538,7 @@ def handle_combat(state):
         "or facing lethal, a buff potion for a big damage turn against a dangerous enemy). Don't hoard potions "
         "indefinitely - an unused potion helps nobody, but don't waste a strong potion on a trivial fight either."
     )
-    choice = ask_jev(state_text, options, instructions)
+    choice = ask_decision(state_text, options, instructions)
 
     if choice == "end_turn":
         do_action("end_turn")
@@ -474,7 +581,7 @@ def handle_event(state):
         options[f"opt_{idx}"] = f"{title} (index {idx})"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, "Which event option should be chosen? Favor options that are safe and beneficial long-term over risky gambles, unless HP is high and the upside is clearly worth it.")
+    choice = ask_decision(state_text, options, "Which event option should be chosen? Favor options that are safe and beneficial long-term over risky gambles, unless HP is high and the upside is clearly worth it.")
     idx = int(choice.split("_")[1])
     do_action("choose_event_option", index=idx)
 
@@ -502,7 +609,7 @@ def handle_rest_site(state):
         options[f"opt_{idx}"] = f"{name} (index {idx})"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, "Which rest site option should be chosen? Rest to heal HP if below ~70% max HP and no urgent upgrade is available; otherwise upgrade a card or use other options.")
+    choice = ask_decision(state_text, options, "Which rest site option should be chosen? Rest to heal HP if below ~70% max HP and no urgent upgrade is available; otherwise upgrade a card or use other options.")
     idx = int(choice.split("_")[1])
     do_action("choose_rest_option", index=idx)
 
@@ -545,7 +652,7 @@ def handle_card_reward(state):
         "4. Avoid picking a card that duplicates a weak effect already overrepresented in the deck.\n"
         "Skip the reward entirely if none of the options clearly improve the deck."
     )
-    choice = ask_jev(state_text, options, instructions)
+    choice = ask_decision(state_text, options, instructions)
 
     if choice == "skip":
         do_action("skip_card_reward")
@@ -572,7 +679,7 @@ def handle_rewards(state):
         options[f"claim_{idx}"] = f"Claim {rtype} (index {idx})"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, "Which reward should be claimed next? All rewards are normally worth claiming, just pick any unclaimed one.")
+    choice = ask_decision(state_text, options, "Which reward should be claimed next? All rewards are normally worth claiming, just pick any unclaimed one.")
     idx = int(choice.split("_")[1])
     do_action("claim_reward", index=idx)
 
@@ -596,7 +703,7 @@ def handle_shop(state):
     options["leave"] = "Leave the shop without buying anything"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, "Should anything be bought at this shop, and if so what? Only buy things that are clearly worth the gold; leave if nothing affordable is good value.")
+    choice = ask_decision(state_text, options, "Should anything be bought at this shop, and if so what? Only buy things that are clearly worth the gold; leave if nothing affordable is good value.")
 
     if choice == "leave":
         do_action("proceed")
@@ -626,7 +733,7 @@ def handle_treasure(state):
         options[f"relic_{idx}"] = f"Take {name} (index {idx})"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, "Which relic should be taken from this treasure chest?")
+    choice = ask_decision(state_text, options, "Which relic should be taken from this treasure chest?")
     idx = int(choice.split("_")[1])
     do_action("claim_treasure_relic", index=idx)
 
@@ -651,7 +758,7 @@ def handle_relic_select(state):
         options["skip"] = "Skip, take no relic"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, "Which relic should be picked here?")
+    choice = ask_decision(state_text, options, "Which relic should be picked here?")
     if choice == "skip":
         do_action("skip_relic_selection")
     else:
@@ -677,7 +784,7 @@ def handle_hand_select(state):
         options[f"card_{idx}"] = f"Select '{name}' (index {idx})"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, f"Given the prompt '{prompt}', which card should be selected?")
+    choice = ask_decision(state_text, options, f"Given the prompt '{prompt}', which card should be selected?")
     idx = int(choice.split("_")[1])
     do_action("combat_select_card", card_index=idx)
     do_action("combat_confirm_selection")
@@ -713,7 +820,7 @@ def handle_card_select(state):
         options[f"card_{idx}"] = f"Select '{name}' (index {idx})"
 
     state_text = "\n".join(lines)
-    choice = ask_jev(state_text, options, f"On this '{screen_type}' card screen, which card should be selected? {prompt}")
+    choice = ask_decision(state_text, options, f"On this '{screen_type}' card screen, which card should be selected? {prompt}")
     idx = int(choice.split("_")[1])
     do_action("select_card", index=idx)
 
@@ -740,7 +847,7 @@ def handle_map(state):
     lines.append(f"Relics: {relics_summary(player)}")
 
     state_text = "\n".join(lines)
-    choice = ask_jev(
+    choice = ask_decision(
         state_text, options,
         "Which map node should be chosen next? Prefer rest sites when HP is low, "
         "take shops/treasure when healthy, avoid elites at low HP, and generally favor "
@@ -767,7 +874,7 @@ def handle_menu(state):
 
     options = {f"opt_{i}": o.get("name", f"option_{i}") for i, o in enumerate(enabled)}
     state_text = f"Menu screen: {state.get('menu_screen')}. Message: {state.get('message', '')}\nOptions: " + ", ".join(options.values())
-    choice = ask_jev(
+    choice = ask_decision(
         state_text, options,
         "Which menu option should be selected to progress toward starting or continuing a Slay the Spire 2 run? "
         "If a tutorial or info popup is active, dismiss it (advance/proceed). If a game mode or character choice "
