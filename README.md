@@ -14,6 +14,21 @@ generic deckbuilding heuristics plus a snapshot of a community tier list,
 not deep game knowledge. Expect bad calls sometimes. See "Tuning" below for
 how to change that, PRs welcome too if you want to make it actually good.
 
+## Credits
+
+None of this works without [STS2MCP](https://github.com/Gennadiyev/STS2MCP)
+by [Yikun Ji (Kunologist)](https://github.com/Gennadiyev), the mod that
+exposes Slay the Spire 2's game state and accepts actions over a local HTTP
+API in the first place. That's the actual hard part, this repo is just a
+thin bridge on top of it.
+
+The prebuilt DLL in `mods/` is built from
+[DarkArcZ's fix/v0.111-compat branch](https://github.com/DarkArcZ/STS2MCP/tree/fix/v0.111-compat)
+([PR #132](https://github.com/Gennadiyev/STS2MCP/pull/132)), which fixed a
+game-version compatibility break in STS2MCP's combat state reading. Thanks
+to both for the work, see `mods/PATCH_NOTES.md` for the couple of extra
+one-line patches on top needed for an even newer game build.
+
 ## How it works
 
 1. [STS2MCP](https://github.com/Gennadiyev/STS2MCP) (a Slay the Spire 2 mod)
